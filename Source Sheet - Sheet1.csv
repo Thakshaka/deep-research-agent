@@ -1,2 +1,3 @@
-Date,Disaster,Country,Location
-2026-04-20,Flash Flood,New Zealand,Wellington
+Date,Disaster,Country,Location,Run
+2016-11-14,Earthquake,New Zealand,Culverden/Kaikoura (Canterbury province) / Wellington province,True
+2026-04-20,Flash Flood,New Zealand,Wellington,False
