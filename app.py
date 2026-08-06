@@ -97,23 +97,24 @@ st.write(
     "extract impact details, and save a structured record with sources."
 )
 
-with st.form("research_form"):
-    st.subheader("Event details")
-    event_name = st.text_input("Event name", placeholder="Flash Flood")
-    location = st.text_input("Location", placeholder="Wellington")
-    country = st.text_input("Country", placeholder="New Zealand")
-    year = st.number_input("Year", min_value=1900, max_value=2100, value=2024, step=1)
-    use_exact_date = st.checkbox("I know the month and day")
-    month = day = None
-    if use_exact_date:
-        col_month, col_day = st.columns(2)
-        with col_month:
-            month = st.number_input("Month", min_value=1, max_value=12, value=1)
-        with col_day:
-            day = st.number_input("Day", min_value=1, max_value=31, value=1)
-    submitted = st.form_submit_button("Run research", type="primary")
+st.subheader("Event details")
+event_name = st.text_input("Event name", placeholder="Flash Flood")
+location = st.text_input("Location", placeholder="Wellington")
+country = st.text_input("Country", placeholder="New Zealand")
+year = st.number_input("Year", min_value=1900, max_value=2100, value=2024, step=1)
 
-if submitted:
+use_exact_date = st.checkbox("I know the month and day")
+month = day = None
+if use_exact_date:
+    col_month, col_day = st.columns(2)
+    with col_month:
+        month = st.number_input("Month", min_value=1, max_value=12, value=1)
+    with col_day:
+        day = st.number_input("Day", min_value=1, max_value=31, value=1)
+
+run_research = st.button("Run research", type="primary")
+
+if run_research:
     missing = [
         label
         for label, value in [
