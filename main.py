@@ -257,14 +257,245 @@ def merge_event_record(
     return merged, changed_fields
 
 
+def build_event_date(year: int, month: int | None = None, day: int | None = None) -> str:
+    if month and day:
+        return f"{year:04d}-{month:02d}-{day:02d}"
+    if month:
+        return f"{year:04d}-{month:02d}-01"
+    return f"{year:04d}-01-01"
+
+
+def ensure_api_key() -> None:
+    load_dotenv(Path(__file__).resolve().parent / ".env")
+    if not os.environ.get("GEMINI_API_KEY"):
+        raise ValueError("Set GEMINI_API_KEY in .env or the environment.")
+
+
+def process_event(
+    client: genai.Client,
+    *,
+    date: str,
+    disaster: str,
+    country: str,
+    location: str,
+    previous_sheet1: dict[str, dict],
+    previous_sources: dict[str, list[str]],
+    run_date: str,
+    log: callable = print,
+) -> tuple[dict, list[str], list[dict], str]:
+    search_query = f"{country} {location} {disaster} on {date}"
+    log(f"Grounding and researching: '{search_query}'...")
+
+    research_response = generate_with_retry(
+        client,
+        contents=(
+            "Conduct deep research and extract full operational, human, "
+            f"and physical damage metrics for: {search_query}"
+        ),
+        config=types.GenerateContentConfig(
+            tools=[GOOGLE_SEARCH_TOOL],
+            temperature=0.0,
+        ),
+    )
+
+    unique_links = extract_grounding_links(research_response)
+    log(f"Retrieved {len(unique_links)} verified source URLs from the grounding metadata.")
+
+    extraction_prompt = (
+        "Map the following research details to the schema. "
+        "Use only information supported by the research. "
+        "If a field is unknown, use a clear placeholder such as 'Unknown'.\n\n"
+        f"{research_response.text}"
+    )
+    structured_response = generate_with_retry(
+        client,
+        contents=extraction_prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=EventExtract,
+            temperature=0.0,
+        ),
+    )
+
+    extracted_data = EventExtract.model_validate_json(structured_response.text)
+    incoming_record = extracted_data.model_dump()
+    event_id = str(incoming_record["Event_ID"])
+
+    merged_links = sorted(set(previous_sources.get(event_id, [])) | set(unique_links))
+    merged_record, changed_fields = merge_event_record(
+        previous_sheet1.get(event_id),
+        incoming_record,
+        merged_links,
+        run_date,
+    )
+    event_sources = [{"Event_ID": event_id, "Source_Link": link} for link in merged_links]
+    return merged_record, changed_fields, event_sources, search_query
+
+
+def finalize_and_save_datasets(
+    sheet1_records: list[dict],
+    sources_records: list[dict],
+    history_records: list[dict],
+    processed_event_ids: set[str],
+    previous_sheet1: dict[str, dict],
+    previous_sources: dict[str, list[str]],
+    run_date: str,
+    log: callable = print,
+) -> None:
+    for event_id, previous_record in previous_sheet1.items():
+        if event_id not in processed_event_ids:
+            sheet1_records.append(previous_record)
+
+    for event_id, links in previous_sources.items():
+        if event_id not in processed_event_ids:
+            for link in links:
+                sources_records.append({"Event_ID": event_id, "Source_Link": link})
+
+    df_sheet1 = pd.DataFrame(sheet1_records, columns=SHEET1_COLUMNS)
+    df_sheet1.to_csv(SHEET1_PATH, index=False)
+    log(f"Generated '{dataset_label(SHEET1_PATH)}'")
+
+    if history_records:
+        df_history = pd.DataFrame(history_records, columns=SHEET1_COLUMNS)
+        df_history.insert(0, "Run_Date", run_date)
+        history_exists = Path(SHEET1_HISTORY_PATH).exists()
+        df_history.to_csv(
+            SHEET1_HISTORY_PATH,
+            mode="a",
+            index=False,
+            header=not history_exists,
+        )
+        log(
+            f"Appended {len(history_records)} event(s) to "
+            f"'{dataset_label(SHEET1_HISTORY_PATH)}'"
+        )
+    else:
+        log(
+            f"No meaningful changes; skipped append to "
+            f"'{dataset_label(SHEET1_HISTORY_PATH)}'"
+        )
+
+    df_sources = pd.DataFrame(sources_records)
+    df_sources.to_csv(SOURCES_PATH, index=False)
+    log(f"Generated '{dataset_label(SOURCES_PATH)}'")
+
+    generate_lookup_dashboard(sheet1_records, sources_records)
+
+
+def upsert_source_sheet_row(
+    *,
+    date: str,
+    disaster: str,
+    country: str,
+    location: str,
+) -> None:
+    columns = ["Date", "Disaster", "Country", "Location", SOURCE_RUN_COLUMN]
+    new_row = {
+        "Date": date,
+        "Disaster": disaster,
+        "Country": country,
+        "Location": location,
+        SOURCE_RUN_COLUMN: True,
+    }
+
+    if Path(SOURCE_INPUT_PATH).exists():
+        df = pd.read_csv(SOURCE_INPUT_PATH)
+        for col in columns:
+            if col not in df.columns:
+                df[col] = False if col == SOURCE_RUN_COLUMN else ""
+        mask = (
+            (df["Date"].astype(str) == date)
+            & (df["Disaster"].astype(str) == disaster)
+            & (df["Country"].astype(str) == country)
+            & (df["Location"].astype(str) == location)
+        )
+        if mask.any():
+            df.loc[mask, SOURCE_RUN_COLUMN] = True
+        else:
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+    else:
+        df = pd.DataFrame([new_row], columns=columns)
+
+    df.to_csv(SOURCE_INPUT_PATH, index=False)
+
+
+def process_single_event(
+    *,
+    disaster: str,
+    country: str,
+    location: str,
+    year: int,
+    month: int | None = None,
+    day: int | None = None,
+    upsert_source_sheet: bool = True,
+    log: callable = print,
+) -> dict:
+    ensure_api_key()
+    date = build_event_date(year, month, day)
+
+    if upsert_source_sheet:
+        upsert_source_sheet_row(
+            date=date,
+            disaster=disaster,
+            country=country,
+            location=location,
+        )
+
+    client = genai.Client()
+    run_date = datetime.now().date().isoformat()
+    previous_sheet1 = load_previous_sheet1()
+    previous_sources = load_previous_sources()
+
+    merged_record, changed_fields, event_sources, search_query = process_event(
+        client,
+        date=date,
+        disaster=disaster,
+        country=country,
+        location=location,
+        previous_sheet1=previous_sheet1,
+        previous_sources=previous_sources,
+        run_date=run_date,
+        log=log,
+    )
+
+    event_id = str(merged_record["Event_ID"])
+    if changed_fields:
+        log(f"Updated fields for {event_id}: {', '.join(changed_fields)}")
+    else:
+        log(f"No meaningful changes for {event_id}; kept previous values.")
+
+    sheet1_records = [merged_record]
+    sources_records = event_sources
+    history_records = [merged_record] if changed_fields else []
+
+    finalize_and_save_datasets(
+        sheet1_records,
+        sources_records,
+        history_records,
+        {event_id},
+        previous_sheet1,
+        previous_sources,
+        run_date,
+        log=log,
+    )
+
+    return {
+        "search_query": search_query,
+        "event_id": event_id,
+        "record": merged_record,
+        "changed_fields": changed_fields,
+        "sources": [entry["Source_Link"] for entry in event_sources],
+    }
+
+
 # =====================================================================
 # 2. Main Processing Function
 # =====================================================================
 def process_natural_disasters(source_csv_path: str):
-    load_dotenv(Path(__file__).resolve().parent / ".env")
-
-    if not os.environ.get("GEMINI_API_KEY"):
-        print("Error: Set GEMINI_API_KEY in .env or the environment.", file=sys.stderr)
+    try:
+        ensure_api_key()
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
 
     client = genai.Client()
@@ -297,59 +528,22 @@ def process_natural_disasters(source_csv_path: str):
     processed_event_ids: set[str] = set()
 
     for _, row in df_to_run.iterrows():
-        date = row["Date"]
-        disaster = row["Disaster"]
-        country = row["Country"]
-        location = row["Location"]
-
-        search_query = f"{country} {location} {disaster} on {date}"
-        print(f"\nGrounding and researching: '{search_query}'...")
-
-        research_response = generate_with_retry(
+        print()
+        merged_record, changed_fields, event_sources, _search_query = process_event(
             client,
-            contents=(
-                "Conduct deep research and extract full operational, human, "
-                f"and physical damage metrics for: {search_query}"
-            ),
-            config=types.GenerateContentConfig(
-                tools=[GOOGLE_SEARCH_TOOL],
-                temperature=0.0,
-            ),
+            date=str(row["Date"]),
+            disaster=str(row["Disaster"]),
+            country=str(row["Country"]),
+            location=str(row["Location"]),
+            previous_sheet1=previous_sheet1,
+            previous_sources=previous_sources,
+            run_date=run_date,
         )
 
-        unique_links = extract_grounding_links(research_response)
-        source_count = len(unique_links)
-        print(f"Retrieved {source_count} verified source URLs from the grounding metadata.")
-
-        extraction_prompt = (
-            "Map the following research details to the schema. "
-            "Use only information supported by the research. "
-            "If a field is unknown, use a clear placeholder such as 'Unknown'.\n\n"
-            f"{research_response.text}"
-        )
-        structured_response = generate_with_retry(
-            client,
-            contents=extraction_prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=EventExtract,
-                temperature=0.0,
-            ),
-        )
-
-        extracted_data = EventExtract.model_validate_json(structured_response.text)
-        incoming_record = extracted_data.model_dump()
-        event_id = str(incoming_record["Event_ID"])
-
-        merged_links = sorted(set(previous_sources.get(event_id, [])) | set(unique_links))
-        merged_record, changed_fields = merge_event_record(
-            previous_sheet1.get(event_id),
-            incoming_record,
-            merged_links,
-            run_date,
-        )
+        event_id = str(merged_record["Event_ID"])
         sheet1_records.append(merged_record)
         processed_event_ids.add(event_id)
+        sources_records.extend(event_sources)
 
         if changed_fields:
             print(f"Updated fields for {event_id}: {', '.join(changed_fields)}")
@@ -357,51 +551,18 @@ def process_natural_disasters(source_csv_path: str):
         else:
             print(f"No meaningful changes for {event_id}; kept previous values.")
 
-        for link in merged_links:
-            sources_records.append({"Event_ID": event_id, "Source_Link": link})
+        previous_sheet1[event_id] = merged_record
+        previous_sources[event_id] = [entry["Source_Link"] for entry in event_sources]
 
-    # Keep unprocessed events from the previous snapshot.
-    for event_id, previous_record in previous_sheet1.items():
-        if event_id not in processed_event_ids:
-            sheet1_records.append(previous_record)
-
-    for event_id, links in previous_sources.items():
-        if event_id not in processed_event_ids:
-            for link in links:
-                sources_records.append({"Event_ID": event_id, "Source_Link": link})
-
-    # =====================================================================
-    # 3. Write results to local relational CSV tables
-    # =====================================================================
-    df_sheet1 = pd.DataFrame(sheet1_records, columns=SHEET1_COLUMNS)
-    df_sheet1.to_csv(SHEET1_PATH, index=False)
-    print(f"Generated '{dataset_label(SHEET1_PATH)}'")
-
-    if history_records:
-        df_history = pd.DataFrame(history_records, columns=SHEET1_COLUMNS)
-        df_history.insert(0, "Run_Date", run_date)
-        history_exists = Path(SHEET1_HISTORY_PATH).exists()
-        df_history.to_csv(
-            SHEET1_HISTORY_PATH,
-            mode="a",
-            index=False,
-            header=not history_exists,
-        )
-        print(
-            f"Appended {len(history_records)} event(s) to "
-            f"'{dataset_label(SHEET1_HISTORY_PATH)}'"
-        )
-    else:
-        print(
-            f"No meaningful changes; skipped append to "
-            f"'{dataset_label(SHEET1_HISTORY_PATH)}'"
-        )
-
-    df_sources = pd.DataFrame(sources_records)
-    df_sources.to_csv(SOURCES_PATH, index=False)
-    print(f"Generated '{dataset_label(SOURCES_PATH)}'")
-
-    generate_lookup_dashboard(sheet1_records, sources_records)
+    finalize_and_save_datasets(
+        sheet1_records,
+        sources_records,
+        history_records,
+        processed_event_ids,
+        previous_sheet1,
+        previous_sources,
+        run_date,
+    )
 
 
 # =====================================================================

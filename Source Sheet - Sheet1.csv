@@ -1,3 +1,6 @@
 Date,Disaster,Country,Location,Run
 2016-11-14,Earthquake,New Zealand,Culverden/Kaikoura (Canterbury province) / Wellington province,True
 2026-04-20,Flash Flood,New Zealand,Wellington,False
+2020-11-09,Flood,New Zealand,Napier (Hawke’s Bay region),True
+2026-01-01,Flood,New Zealand,Wellington,True
+2020-11-09,flood,New Zealand,napier (hawke's bay region),True

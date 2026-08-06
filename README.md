@@ -33,6 +33,34 @@ GEMINI_API_KEY=your-api-key-here
 
 ## Run
 
+### GUI (recommended for lay users)
+
+**Option A — Desktop app (most reliable)**
+
+```bash
+python gui.py
+```
+
+**Option B — Browser app (recommended on macOS)**
+
+```bash
+pip install flask
+python web_gui.py
+```
+
+Open http://127.0.0.1:8080
+
+**Option C — Streamlit (experimental on macOS)**
+
+```bash
+pip install streamlit
+streamlit run app.py
+```
+
+Streamlit may segfault on some Macs when research runs. If you see `ERR_CONNECTION_REFUSED`, use Option A or B instead.
+
+### Command line (batch CSV)
+
 ```bash
 python main.py
 ```
@@ -187,6 +215,10 @@ No meaningful changes; skipped append to 'Dataset - Sheet1 History'
 ```
 deep-research-agent/
 ├── main.py                      # Pipeline script
+├── app.py                       # Streamlit web GUI (experimental on macOS)
+├── web_gui.py                   # Flask browser GUI (recommended on macOS)
+├── gui.py                       # Desktop GUI (Tkinter)
+├── run_event.py                 # Isolated research runner for GUIs
 ├── Source Sheet - Sheet1.csv    # Input event list
 ├── Dataset - Sheet1.csv         # Latest output snapshot
 ├── Dataset - Sheet1 History.csv # Change history
